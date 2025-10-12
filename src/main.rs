@@ -9,7 +9,7 @@ use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus};
 use rat_widget::msgdialog::{MsgDialog, MsgDialogState};
 use rat_widget::scrolled::{Scroll, ScrollbarPolicy};
 use rat_widget::statusline::{StatusLine, StatusLineState};
-use rat_widget::text::{HasScreenCursor, TextPosition, TextStyle};
+use rat_widget::text::{HasScreenCursor, TextStyle};
 use rat_widget::textarea::{TextArea, TextAreaState, TextWrap};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
