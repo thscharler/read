@@ -1,44 +1,45 @@
 use anyhow::Error;
+use log::debug;
 use rat_salsa::event::RenderedEvent;
 use rat_salsa::poll::{PollCrossterm, PollRendered, PollTasks, PollTimers};
 use rat_salsa::timer::{TimeOut, TimerDef, TimerHandle};
 use rat_salsa::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
-use rat_theme3::{SalsaTheme, create_theme};
-use rat_widget::event::{Dialog, HandleEvent, ReadOnly, ct_event, try_flow};
-use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus};
+use rat_theme4::WidgetStyle;
+use rat_theme4::theme::SalsaTheme;
+use rat_widget::event::{Dialog, HandleEvent, Outcome, ReadOnly, Regular, ct_event, event_flow};
+use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
+use rat_widget::list::{List, ListState};
 use rat_widget::msgdialog::{MsgDialog, MsgDialogState};
 use rat_widget::scrolled::{Scroll, ScrollbarPolicy};
-use rat_widget::statusline::{StatusLine, StatusLineState};
-use rat_widget::text::{HasScreenCursor, TextStyle};
+use rat_widget::text::HasScreenCursor;
+use rat_widget::text::clipboard::cli::setup_cli_clipboard;
 use rat_widget::textarea::{TextArea, TextAreaState, TextWrap};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
-use ratatui::widgets::StatefulWidget;
+use ratatui::widgets::{ListItem, StatefulWidget};
 use std::env::args;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 fn main() -> Result<(), Error> {
     setup_logging()?;
+    setup_cli_clipboard();
 
+    let mut config = Config::default();
+    config.delay = 1500;
     let mut args = args();
     args.next();
-    let Some(f) = args.next() else {
-        eprintln!("read file.txt");
-        return Ok(());
-    };
+    if let Some(dir) = args.next() {
+        config.base = PathBuf::from(dir);
+    } else {
+        config.base = PathBuf::from(".");
+    }
 
-    let text = read_file(&PathBuf::from(&f))?;
-
-    let config = Config::default();
-    let theme = create_theme("Imperial Shell").expect("theme");
+    let theme = rat_theme4::create_salsa_theme("EverForest Light");
     let mut global = Global::new(config, theme);
     let mut state = Scenery::default();
-    state.text.set_text(text);
-    state.delay = 500;
-    state.status.status(0, f);
+    state.show_files = true;
 
     run_tui(
         init,
@@ -62,7 +63,7 @@ pub struct Global {
     ctx: SalsaAppContext<RdEvent, Error>,
 
     pub cfg: Config,
-    pub theme: Box<dyn SalsaTheme>,
+    pub theme: SalsaTheme,
 }
 
 impl SalsaContext<RdEvent, Error> for Global {
@@ -77,7 +78,7 @@ impl SalsaContext<RdEvent, Error> for Global {
 }
 
 impl Global {
-    pub fn new(cfg: Config, theme: Box<dyn SalsaTheme>) -> Self {
+    pub fn new(cfg: Config, theme: SalsaTheme) -> Self {
         Self {
             ctx: Default::default(),
             cfg,
@@ -88,7 +89,10 @@ impl Global {
 
 /// Configuration.
 #[derive(Debug, Default)]
-pub struct Config {}
+pub struct Config {
+    delay: u64,
+    base: PathBuf,
+}
 
 /// Application wide messages.
 #[derive(Debug)]
@@ -119,18 +123,21 @@ impl From<crossterm::event::Event> for RdEvent {
 
 #[derive(Debug, Default)]
 pub struct Scenery {
-    pub text: TextAreaState,
-    pub status: StatusLineState,
+    pub txt_files: Vec<(String, PathBuf)>,
+    pub show_files: bool,
 
     pub timer: TimerHandle,
-    pub delay: u64,
+
+    pub files: ListState,
+    pub text: TextAreaState,
 
     pub error_dlg: MsgDialogState,
 }
 
 impl HasFocus for Scenery {
     fn build(&self, builder: &mut FocusBuilder) {
-        builder.widget(&self.text);
+        builder.widget_navigate(&self.text, Navigation::Regular);
+        builder.widget(&self.files);
     }
 
     fn focus(&self) -> FocusFlag {
@@ -142,22 +149,6 @@ impl HasFocus for Scenery {
     }
 }
 
-fn read_file(file: &Path) -> Result<String, Error> {
-    let txt = fs::read_to_string(file)?;
-    let mut buf = String::new();
-
-    for l in txt.lines() {
-        if !l.is_empty() {
-            buf.push_str(l.trim());
-            buf.push(' ');
-        } else {
-            buf.push_str("\n\n");
-        }
-    }
-
-    Ok(buf)
-}
-
 pub fn render(
     area: Rect,
     buf: &mut Buffer,
@@ -166,41 +157,27 @@ pub fn render(
 ) -> Result<(), Error> {
     if state.error_dlg.active() {
         MsgDialog::new()
-            .styles(ctx.theme.msg_dialog_style())
+            .styles(ctx.theme.style(WidgetStyle::MSG_DIALOG))
             .render(area, buf, &mut state.error_dlg);
     }
 
-    let ll = Layout::vertical([Constraint::Fill(1), Constraint::Length(1)]).split(area);
+    let file_width = if state.show_files { 20 } else { 0 };
+    let lr = Layout::horizontal([
+        Constraint::Length(file_width), //
+        Constraint::Fill(1),
+    ])
+    .split(area);
+
+    List::new(state.txt_files.iter().map(|v| ListItem::new(v.0.as_str())))
+        .scroll(Scroll::new().styles(ctx.theme.style(WidgetStyle::SCROLL)))
+        .styles(ctx.theme.style(WidgetStyle::LIST))
+        .render(lr[0], buf, &mut state.files);
 
     TextArea::new()
         .vscroll(Scroll::new().policy(ScrollbarPolicy::Collapse))
         .text_wrap(TextWrap::Word(8))
-        .styles(TextStyle {
-            style: Style::new().fg(ctx.theme.palette().text_light),
-            select: Some(ctx.theme.text_select()),
-            scroll: Some(ctx.theme.scroll_style()),
-            border_style: Some(ctx.theme.container_border()),
-            ..TextStyle::default()
-        })
-        .render(ll[0], buf, &mut state.text);
-
-    state.status.status(
-        1,
-        format!("{}/{}", state.text.cursor().y, state.text.len_lines()),
-    );
-    if state.timer != TimerHandle::default() {
-        state.status.status(2, format!("{}ms", state.delay));
-    }
-
-    StatusLine::new()
-        .layout([
-            Constraint::Fill(1),
-            Constraint::Length(15),
-            Constraint::Length(10),
-            Constraint::Length(10),
-        ])
-        .styles_ext(ctx.theme.statusline_style_ext())
-        .render(ll[1], buf, &mut state.status);
+        .styles(ctx.theme.style(WidgetStyle::TEXTVIEW))
+        .render(lr[1], buf, &mut state.text);
 
     ctx.set_screen_cursor(state.text.screen_cursor());
 
@@ -209,7 +186,59 @@ pub fn render(
 
 pub fn init(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
     ctx.set_focus(FocusBuilder::build_for(state));
-    ctx.focus().focus(&state.text);
+    ctx.focus().focus(&state.files);
+
+    load_files(state, ctx)?;
+    if state.txt_files.len() > 0 {
+        state.files.select(Some(0));
+    }
+    read_file(state)?;
+
+    Ok(())
+}
+
+fn load_files(state: &mut Scenery, ctx: &Global) -> Result<(), Error> {
+    state.txt_files.clear();
+    for f in fs::read_dir(&ctx.cfg.base)? {
+        let f = f?;
+        let m = f.metadata()?;
+        if m.is_file() && f.file_name().to_string_lossy().ends_with(".txt") {
+            let name = f
+                .path()
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            state.txt_files.push((name, f.path()));
+        }
+    }
+    state.txt_files.sort();
+
+    state.files.rows_changed(state.txt_files.len());
+
+    Ok(())
+}
+
+fn read_file(state: &mut Scenery) -> Result<(), Error> {
+    if let Some(idx) = state.files.selected_checked() {
+        let f = &state.txt_files[idx].1;
+
+        let txt = fs::read(f)?;
+        let txt = String::from_utf8_lossy(&txt);
+        let mut buf = String::new();
+        for l in txt.lines() {
+            if !l.is_empty() {
+                buf.push_str(l.trim());
+                buf.push(' ');
+            } else {
+                buf.push_str("\n\n");
+            }
+        }
+
+        state.text.set_text(txt);
+    } else {
+        state.text.clear();
+    }
     Ok(())
 }
 
@@ -219,11 +248,11 @@ pub fn event(
     ctx: &mut Global,
 ) -> Result<Control<RdEvent>, Error> {
     match event {
-        RdEvent::Rendered => try_flow!({
+        RdEvent::Rendered => event_flow!({
             ctx.set_focus(FocusBuilder::rebuild_for(state, ctx.take_focus()));
             Control::Continue
         }),
-        RdEvent::Message(s) => try_flow!({
+        RdEvent::Message(s) => event_flow!({
             state.error_dlg.append(s.as_str());
             Control::Changed
         }),
@@ -232,13 +261,25 @@ pub fn event(
 
     if let RdEvent::Event(event) = event {
         match &event {
-            ct_event!(resized) => try_flow!(Control::Changed),
-            ct_event!(key press CONTROL-'q') => try_flow!(Control::Quit),
-            ct_event!(key press 'q') => try_flow!(Control::Quit),
+            ct_event!(resized) => event_flow!(Control::Changed),
+            ct_event!(focus_gained) => event_flow!({
+                load_files(state, ctx)?;
+                if state.files.selected_checked().is_none() {
+                    if state.txt_files.len() > 0 {
+                        state.files.select(Some(state.txt_files.len() - 1));
+                    }
+                    read_file(state)?;
+                    Control::Changed
+                } else {
+                    Control::Continue
+                }
+            }),
+            ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
+            ct_event!(key press 'q') => event_flow!(Control::Quit),
             _ => {}
         };
 
-        try_flow!({
+        event_flow!({
             if state.error_dlg.active() {
                 state.error_dlg.handle(event, Dialog).into()
             } else {
@@ -247,67 +288,77 @@ pub fn event(
         });
 
         ctx.handle_focus(event);
-    }
-
-    try_flow!(log text: text_event(event, state, ctx)?);
-
-    Ok(Control::Continue)
-}
-
-fn text_event(
-    event: &RdEvent,
-    state: &mut Scenery,
-    ctx: &mut Global,
-) -> Result<Control<RdEvent>, Error> {
-    if let RdEvent::Event(event) = event {
-        try_flow!(state.text.handle(event, ReadOnly));
 
         match event {
-            ct_event!(key press 'r') => try_flow!({
-                state.delay += 100;
-
-                ctx.remove_timer(state.timer);
-                state.timer = ctx.add_timer(
-                    TimerDef::new()
-                        .timer(Duration::from_millis(state.delay))
-                        .repeat_forever(),
-                );
-
-                Control::Changed
-            }),
-            ct_event!(key press 'e') => try_flow!({
-                if state.delay > 100 {
-                    state.delay -= 100;
+            ct_event!(keycode press F(1)) => event_flow!({
+                if state.timer == TimerHandle::default() {
+                    state.timer = ctx.add_timer(
+                        TimerDef::new()
+                            .timer(Duration::from_millis(ctx.cfg.delay))
+                            .repeat_forever(),
+                    );
+                } else {
+                    ctx.remove_timer(state.timer);
+                    state.timer = TimerHandle::default();
                 }
-
-                ctx.remove_timer(state.timer);
-                state.timer = ctx.add_timer(
-                    TimerDef::new()
-                        .timer(Duration::from_millis(state.delay))
-                        .repeat_forever(),
-                );
-
                 Control::Changed
             }),
-            ct_event!(key press 's') => try_flow!({
-                ctx.remove_timer(state.timer);
-                state.timer = TimerHandle::default();
+            ct_event!(keycode press F(3)) => event_flow!({
+                state.show_files = !state.show_files;
+                debug!("show {}", state.show_files);
+                if state.show_files {
+                    ctx.focus().focus(&state.files);
+                } else {
+                    ctx.focus().focus(&state.text);
+                }
+                Control::Changed
+            }),
+            ct_event!(keycode press F(5)) => event_flow!({
+                ctx.cfg.delay += 100;
+                state.timer = ctx.replace_timer(
+                    Some(state.timer),
+                    TimerDef::new()
+                        .timer(Duration::from_millis(ctx.cfg.delay))
+                        .repeat_forever(),
+                );
+                Control::Changed
+            }),
+            ct_event!(keycode press F(6)) => event_flow!({
+                if ctx.cfg.delay > 100 {
+                    ctx.cfg.delay -= 100;
+                }
+                state.timer = ctx.replace_timer(
+                    Some(state.timer),
+                    TimerDef::new()
+                        .timer(Duration::from_millis(ctx.cfg.delay))
+                        .repeat_forever(),
+                );
                 Control::Changed
             }),
             _ => {}
         }
+
+        event_flow!(match state.files.handle(event, Regular) {
+            Outcome::Changed => {
+                read_file(state)?;
+                Control::Changed
+            }
+            r => r.into(),
+        });
+        event_flow!(state.text.handle(event, ReadOnly));
     }
 
     if let RdEvent::Timer(timeout) = event {
         if state.timer == timeout.handle {
-            try_flow!({
-                let c = state
+            event_flow!({
+                let (_, mut row) = state
                     .text
                     .screen_cursor()
                     .unwrap_or((state.text.area.x, state.text.area.y));
-                state
-                    .text
-                    .set_screen_cursor((c.0 as i16, c.1 as i16 + 1), false);
+                if row + 1 < state.text.area.bottom() {
+                    row = state.text.area.bottom().saturating_sub(1);
+                }
+                state.text.set_screen_cursor((0, row as i16 + 1), false);
                 Control::Changed
             })
         }

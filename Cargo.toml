@@ -5,10 +5,11 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0"
-rat-salsa = "2.1"
-rat-widget = "1.2"
-ratatui = "0.29"
-rat-theme3 = "2.0"
-crossterm = "0.28"
+ratatui = "0.30"
+crossterm = "0.29"
 fern = "0.7"
 log = "0.4"
+
+rat-salsa = { version = "4.0", features = ["dialog_widgets"] }
+rat-widget = { version = "3.2", features = ["user_directories", "cli-clipboard"] }
+rat-theme4 = { version = "4.5" }
