@@ -1,11 +1,27 @@
+#![cfg_attr(
+    all(feature = "wgpu", not(feature = "term"), windows),
+    windows_subsystem = "windows"
+)]
+#[cfg(feature = "term")]
+pub(crate) use rat_salsa;
+#[cfg(all(feature = "wgpu", not(feature = "term")))]
+pub(crate) use rat_salsa_wgpu as rat_salsa;
+
+use crate::rat_salsa::event::RenderedEvent;
+#[cfg(feature = "term")]
+use crate::rat_salsa::poll::PollCrossterm;
+use crate::rat_salsa::poll::{PollRendered, PollTasks, PollTimers};
+use crate::rat_salsa::timer::{TimeOut, TimerDef, TimerHandle};
+use crate::rat_salsa::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use anyhow::Error;
 use log::debug;
-use rat_salsa::event::RenderedEvent;
-use rat_salsa::poll::{PollCrossterm, PollRendered, PollTasks, PollTimers};
-use rat_salsa::timer::{TimeOut, TimerDef, TimerHandle};
-use rat_salsa::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
-use rat_theme4::WidgetStyle;
+#[cfg(all(feature = "wgpu", not(feature = "term")))]
+use rat_salsa_wgpu::events::ConvertCrossterm;
+use rat_salsa_wgpu::font::FontData;
+#[cfg(all(feature = "wgpu", not(feature = "term")))]
+use rat_salsa_wgpu::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
+use rat_theme4::{WidgetStyle, create_salsa_theme};
 use rat_widget::event::{Dialog, HandleEvent, Outcome, ReadOnly, Regular, ct_event, event_flow};
 use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::list::{List, ListState};
@@ -16,7 +32,8 @@ use rat_widget::text::clipboard::cli::setup_cli_clipboard;
 use rat_widget::textarea::{TextArea, TextAreaState, TextWrap};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::widgets::{ListItem, StatefulWidget};
+use ratatui::symbols;
+use ratatui::widgets::{Block, Borders, ListItem, StatefulWidget};
 use std::env::args;
 use std::fs;
 use std::path::PathBuf;
@@ -41,19 +58,24 @@ fn main() -> Result<(), Error> {
     let mut state = Scenery::default();
     state.show_files = true;
 
-    run_tui(
-        init,
-        render,
-        event,
-        error,
-        &mut global,
-        &mut state,
-        RunConfig::default()?
-            .poll(PollCrossterm)
-            .poll(PollTimers::default())
+    #[cfg(all(feature = "wgpu", not(feature = "term")))]
+    let run_cfg = {
+        let mut r = RunConfig::new(ConvertCrossterm::new())?
+            .window_title("Read")
             .poll(PollTasks::default())
-            .poll(PollRendered),
-    )?;
+            .poll(PollTimers::default())
+            .poll(PollBlink::default())
+            .poll(PollRendered);
+        r
+    };
+    #[cfg(feature = "term")]
+    let run_cfg = RunConfig::default()?
+        .poll(PollCrossterm)
+        .poll(PollTasks::default())
+        .poll(PollTimers::default())
+        .poll(PollRendered);
+
+    run_tui(init, render, event, error, &mut global, &mut state, run_cfg)?;
 
     Ok(())
 }
@@ -174,6 +196,11 @@ pub fn render(
         .render(lr[0], buf, &mut state.files);
 
     TextArea::new()
+        .block(
+            Block::new()
+                .borders(Borders::LEFT)
+                .border_set(symbols::border::EMPTY),
+        )
         .vscroll(Scroll::new().policy(ScrollbarPolicy::Collapse))
         .text_wrap(TextWrap::Word(8))
         .styles(ctx.theme.style(WidgetStyle::TEXTVIEW))
@@ -195,6 +222,88 @@ pub fn init(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
     read_file(state)?;
 
     Ok(())
+}
+
+pub fn event(
+    event: &RdEvent,
+    state: &mut Scenery,
+    ctx: &mut Global,
+) -> Result<Control<RdEvent>, Error> {
+    match event {
+        RdEvent::Rendered => event_flow!({
+            ctx.set_focus(FocusBuilder::rebuild_for(state, ctx.take_focus()));
+            Control::Continue
+        }),
+        RdEvent::Message(s) => event_flow!({
+            state.error_dlg.append(s.as_str());
+            Control::Changed
+        }),
+        _ => {}
+    }
+
+    if let RdEvent::Event(event) = event {
+        match &event {
+            ct_event!(resized) => event_flow!(Control::Changed),
+            ct_event!(focus_gained) => event_flow!(reload_files(state, ctx)?),
+            ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
+            ct_event!(key press 'q') => event_flow!(Control::Quit),
+            _ => {}
+        };
+
+        event_flow!({
+            if state.error_dlg.active() {
+                state.error_dlg.handle(event, Dialog).into()
+            } else {
+                Control::Continue
+            }
+        });
+
+        ctx.handle_focus(event);
+
+        match event {
+            ct_event!(keycode press F(1)) => event_flow!(start_stop(state, ctx)?),
+            ct_event!(keycode press F(3)) => event_flow!(flip_files(state, ctx)?),
+            ct_event!(keycode press F(5)) => event_flow!(faster(state, ctx)?),
+            ct_event!(keycode press F(6)) => event_flow!(slower(state, ctx)?),
+            ct_event!(keycode press F(8)) => event_flow!(next_theme(ctx)?),
+            ct_event!(keycode press SHIFT-F(8)) => event_flow!(prev_theme(ctx)?),
+            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            ct_event!(keycode press F(7)) => event_flow!(next_font(ctx)?),
+            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            ct_event!(keycode press SHIFT-F(7)) => event_flow!(prev_font(ctx)?),
+            _ => {}
+        }
+
+        event_flow!(match state.files.handle(event, Regular) {
+            Outcome::Changed => {
+                read_file(state)?;
+                Control::Changed
+            }
+            r => r.into(),
+        });
+        event_flow!(state.text.handle(event, ReadOnly));
+    }
+
+    if let RdEvent::Timer(timeout) = event {
+        if state.timer == timeout.handle {
+            event_flow!(auto_scroll(state, ctx)?)
+        }
+    }
+
+    Ok(Control::Continue)
+}
+
+fn reload_files(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    load_files(state, ctx)?;
+    if state.files.selected_checked().is_none() {
+        if state.txt_files.len() > 0 {
+            state.files.select(Some(state.txt_files.len() - 1));
+        }
+        read_file(state)?;
+        Ok(Control::Changed)
+    } else {
+        Ok(Control::Continue)
+    }
 }
 
 fn load_files(state: &mut Scenery, ctx: &Global) -> Result<(), Error> {
@@ -242,129 +351,123 @@ fn read_file(state: &mut Scenery) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn event(
-    event: &RdEvent,
-    state: &mut Scenery,
-    ctx: &mut Global,
-) -> Result<Control<RdEvent>, Error> {
-    match event {
-        RdEvent::Rendered => event_flow!({
-            ctx.set_focus(FocusBuilder::rebuild_for(state, ctx.take_focus()));
-            Control::Continue
-        }),
-        RdEvent::Message(s) => event_flow!({
-            state.error_dlg.append(s.as_str());
-            Control::Changed
-        }),
-        _ => {}
+fn auto_scroll(state: &mut Scenery, _ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    let (_, mut row) = state
+        .text
+        .screen_cursor()
+        .unwrap_or((state.text.area.x, state.text.area.y));
+    if row + 1 < state.text.area.bottom() {
+        row = state.text.area.bottom().saturating_sub(1);
     }
+    state.text.set_screen_cursor((0, row as i16 + 1), false);
+    Ok(Control::Changed)
+}
 
-    if let RdEvent::Event(event) = event {
-        match &event {
-            ct_event!(resized) => event_flow!(Control::Changed),
-            ct_event!(focus_gained) => event_flow!({
-                load_files(state, ctx)?;
-                if state.files.selected_checked().is_none() {
-                    if state.txt_files.len() > 0 {
-                        state.files.select(Some(state.txt_files.len() - 1));
-                    }
-                    read_file(state)?;
-                    Control::Changed
-                } else {
-                    Control::Continue
-                }
-            }),
-            ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
-            ct_event!(key press 'q') => event_flow!(Control::Quit),
-            _ => {}
-        };
-
-        event_flow!({
-            if state.error_dlg.active() {
-                state.error_dlg.handle(event, Dialog).into()
-            } else {
-                Control::Continue
-            }
-        });
-
-        ctx.handle_focus(event);
-
-        match event {
-            ct_event!(keycode press F(1)) => event_flow!({
-                if state.timer == TimerHandle::default() {
-                    state.timer = ctx.add_timer(
-                        TimerDef::new()
-                            .timer(Duration::from_millis(ctx.cfg.delay))
-                            .repeat_forever(),
-                    );
-                } else {
-                    ctx.remove_timer(state.timer);
-                    state.timer = TimerHandle::default();
-                }
-                Control::Changed
-            }),
-            ct_event!(keycode press F(3)) => event_flow!({
-                state.show_files = !state.show_files;
-                debug!("show {}", state.show_files);
-                if state.show_files {
-                    ctx.focus().focus(&state.files);
-                } else {
-                    ctx.focus().focus(&state.text);
-                }
-                Control::Changed
-            }),
-            ct_event!(keycode press F(5)) => event_flow!({
-                ctx.cfg.delay += 100;
-                state.timer = ctx.replace_timer(
-                    Some(state.timer),
-                    TimerDef::new()
-                        .timer(Duration::from_millis(ctx.cfg.delay))
-                        .repeat_forever(),
-                );
-                Control::Changed
-            }),
-            ct_event!(keycode press F(6)) => event_flow!({
-                if ctx.cfg.delay > 100 {
-                    ctx.cfg.delay -= 100;
-                }
-                state.timer = ctx.replace_timer(
-                    Some(state.timer),
-                    TimerDef::new()
-                        .timer(Duration::from_millis(ctx.cfg.delay))
-                        .repeat_forever(),
-                );
-                Control::Changed
-            }),
-            _ => {}
-        }
-
-        event_flow!(match state.files.handle(event, Regular) {
-            Outcome::Changed => {
-                read_file(state)?;
-                Control::Changed
-            }
-            r => r.into(),
-        });
-        event_flow!(state.text.handle(event, ReadOnly));
+fn flip_files(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    state.show_files = !state.show_files;
+    debug!("show {}", state.show_files);
+    if state.show_files {
+        ctx.focus().focus(&state.files);
+    } else {
+        ctx.focus().focus(&state.text);
     }
+    Ok(Control::Changed)
+}
 
-    if let RdEvent::Timer(timeout) = event {
-        if state.timer == timeout.handle {
-            event_flow!({
-                let (_, mut row) = state
-                    .text
-                    .screen_cursor()
-                    .unwrap_or((state.text.area.x, state.text.area.y));
-                if row + 1 < state.text.area.bottom() {
-                    row = state.text.area.bottom().saturating_sub(1);
-                }
-                state.text.set_screen_cursor((0, row as i16 + 1), false);
-                Control::Changed
-            })
-        }
+fn slower(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    if ctx.cfg.delay > 100 {
+        ctx.cfg.delay -= 100;
     }
+    state.timer = ctx.replace_timer(
+        Some(state.timer),
+        TimerDef::new()
+            .timer(Duration::from_millis(ctx.cfg.delay))
+            .repeat_forever(),
+    );
+    Ok(Control::Changed)
+}
 
-    Ok(Control::Continue)
+fn faster(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    ctx.cfg.delay += 100;
+    state.timer = ctx.replace_timer(
+        Some(state.timer),
+        TimerDef::new()
+            .timer(Duration::from_millis(ctx.cfg.delay))
+            .repeat_forever(),
+    );
+    Ok(Control::Changed)
+}
+
+fn start_stop(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    if state.timer == TimerHandle::default() {
+        state.timer = ctx.add_timer(
+            TimerDef::new()
+                .timer(Duration::from_millis(ctx.cfg.delay))
+                .repeat_forever(),
+        );
+    } else {
+        ctx.remove_timer(state.timer);
+        state.timer = TimerHandle::default();
+    }
+    Ok(Control::Changed)
+}
+
+fn next_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    let themes = rat_theme4::salsa_themes();
+    let idx = themes
+        .iter()
+        .position(|v| *v == &ctx.theme.name)
+        .unwrap_or(0);
+    if idx + 1 < themes.len() {
+        ctx.theme = create_salsa_theme(themes[idx + 1]);
+    } else {
+        ctx.theme = create_salsa_theme(themes[0]);
+    }
+    Ok(Control::Changed)
+}
+
+fn prev_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    let themes = rat_theme4::salsa_themes();
+    let idx = themes
+        .iter()
+        .position(|v| *v == &ctx.theme.name)
+        .unwrap_or(0);
+    if idx > 0 {
+        ctx.theme = create_salsa_theme(themes[idx - 1]);
+    } else {
+        ctx.theme = create_salsa_theme(themes[themes.len() - 1]);
+    }
+    Ok(Control::Changed)
+}
+
+#[cfg(all(feature = "wgpu", not(feature = "term")))]
+fn next_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    let fonts = FontData.installed_fonts();
+    let idx = fonts
+        .iter()
+        .position(|v| v == &ctx.font_family())
+        .unwrap_or(0);
+    if idx + 1 < fonts.len() {
+        ctx.set_font_family(&fonts[idx + 1]);
+    } else {
+        ctx.set_font_family(&fonts[0]);
+    }
+    Ok(Control::Changed)
+}
+
+#[cfg(all(feature = "wgpu", not(feature = "term")))]
+fn prev_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    let fonts = FontData.installed_fonts();
+    let idx = fonts
+        .iter()
+        .position(|v| v == &ctx.font_family())
+        .unwrap_or(0);
+    if idx > 1 {
+        ctx.set_font_family(&fonts[idx - 1]);
+    } else {
+        ctx.set_font_family(&fonts[fonts.len() - 1]);
+    }
+    Ok(Control::Changed)
 }
 
 pub fn error(
