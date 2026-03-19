@@ -13,7 +13,7 @@ use crate::rat_salsa::poll::PollCrossterm;
 use crate::rat_salsa::poll::{PollRendered, PollTasks, PollTimers};
 use crate::rat_salsa::timer::{TimeOut, TimerDef, TimerHandle};
 use crate::rat_salsa::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
-use anyhow::Error;
+use anyhow::{Error, anyhow};
 use log::debug;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 use rat_salsa_wgpu::events::ConvertCrossterm;
@@ -21,7 +21,7 @@ use rat_salsa_wgpu::font::FontData;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 use rat_salsa_wgpu::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
-use rat_theme4::{WidgetStyle, create_salsa_theme};
+use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
 use rat_widget::event::{Dialog, HandleEvent, Outcome, ReadOnly, Regular, ct_event, event_flow};
 use rat_widget::focus::{FocusBuilder, FocusFlag, HasFocus, Navigation};
 use rat_widget::list::{List, ListState};
@@ -32,8 +32,10 @@ use rat_widget::text::clipboard::cli::setup_cli_clipboard;
 use rat_widget::textarea::{TextArea, TextAreaState, TextWrap};
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::style::Style;
 use ratatui::symbols;
-use ratatui::widgets::{Block, Borders, ListItem, StatefulWidget};
+use ratatui::text::Line;
+use ratatui::widgets::{Block, Borders, ListItem, StatefulWidget, Widget};
 use std::env::args;
 use std::fs;
 use std::path::PathBuf;
@@ -60,13 +62,12 @@ fn main() -> Result<(), Error> {
 
     #[cfg(all(feature = "wgpu", not(feature = "term")))]
     let run_cfg = {
-        let mut r = RunConfig::new(ConvertCrossterm::new())?
+        RunConfig::new(ConvertCrossterm::new())?
             .window_title("Read")
             .poll(PollTasks::default())
             .poll(PollTimers::default())
             .poll(PollBlink::default())
-            .poll(PollRendered);
-        r
+            .poll(PollRendered)
     };
     #[cfg(feature = "term")]
     let run_cfg = RunConfig::default()?
@@ -145,6 +146,7 @@ impl From<crossterm::event::Event> for RdEvent {
 
 #[derive(Debug, Default)]
 pub struct Scenery {
+    pub edit: Option<usize>,
     pub txt_files: Vec<(String, PathBuf)>,
     pub show_files: bool,
 
@@ -177,12 +179,6 @@ pub fn render(
     state: &mut Scenery,
     ctx: &mut Global,
 ) -> Result<(), Error> {
-    if state.error_dlg.active() {
-        MsgDialog::new()
-            .styles(ctx.theme.style(WidgetStyle::MSG_DIALOG))
-            .render(area, buf, &mut state.error_dlg);
-    }
-
     let file_width = if state.show_files { 20 } else { 0 };
     let lr = Layout::horizontal([
         Constraint::Length(file_width), //
@@ -195,6 +191,20 @@ pub fn render(
         .styles(ctx.theme.style(WidgetStyle::LIST))
         .render(lr[0], buf, &mut state.files);
 
+    let lt = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(lr[1]);
+
+    let idx = state.files.selected_checked().unwrap_or(0);
+    let (name, _) = &state.txt_files[idx];
+    if state.edit.is_some() {
+        Line::from(format!("[editing] {}", name))
+            .style(ctx.theme.style_style(Style::TITLE))
+            .render(lt[0], buf);
+    } else {
+        Line::from(format!(" {}", name))
+            .style(ctx.theme.style_style(Style::TITLE))
+            .render(lt[0], buf);
+    }
+
     TextArea::new()
         .block(
             Block::new()
@@ -204,7 +214,13 @@ pub fn render(
         .vscroll(Scroll::new().policy(ScrollbarPolicy::Collapse))
         .text_wrap(TextWrap::Word(8))
         .styles(ctx.theme.style(WidgetStyle::TEXTVIEW))
-        .render(lr[1], buf, &mut state.text);
+        .render(lt[1], buf, &mut state.text);
+
+    if state.error_dlg.active() {
+        MsgDialog::new()
+            .styles(ctx.theme.style(WidgetStyle::MSG_DIALOG))
+            .render(area, buf, &mut state.error_dlg);
+    }
 
     ctx.set_screen_cursor(state.text.screen_cursor());
 
@@ -262,26 +278,45 @@ pub fn event(
 
         match event {
             ct_event!(keycode press F(1)) => event_flow!(start_stop(state, ctx)?),
+            ct_event!(keycode press F(2)) => event_flow!(flip_edit(state, ctx)?),
+            ct_event!(keycode press Insert) => event_flow!(insert_new(state, ctx)?),
             ct_event!(keycode press F(3)) => event_flow!(flip_files(state, ctx)?),
             ct_event!(keycode press F(5)) => event_flow!(faster(state, ctx)?),
             ct_event!(keycode press F(6)) => event_flow!(slower(state, ctx)?),
-            ct_event!(keycode press F(8)) => event_flow!(next_theme(ctx)?),
-            ct_event!(keycode press SHIFT-F(8)) => event_flow!(prev_theme(ctx)?),
             #[cfg(all(feature = "wgpu", not(feature = "term")))]
             ct_event!(keycode press F(7)) => event_flow!(next_font(ctx)?),
             #[cfg(all(feature = "wgpu", not(feature = "term")))]
             ct_event!(keycode press SHIFT-F(7)) => event_flow!(prev_font(ctx)?),
+            ct_event!(keycode press F(8)) => event_flow!(next_theme(ctx)?),
+            ct_event!(keycode press SHIFT-F(8)) => event_flow!(prev_theme(ctx)?),
             _ => {}
         }
 
-        event_flow!(match state.files.handle(event, Regular) {
-            Outcome::Changed => {
-                read_file(state)?;
-                Control::Changed
+        if state.edit.is_some() {
+            match state.files.handle(event, Regular) {
+                Outcome::Changed => event_flow!({
+                    match save_current(state, ctx) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            state.files.select(state.edit);
+                            return Err(e);
+                        }
+                    };
+                    Control::Changed
+                }),
+                r => event_flow!(r),
             }
-            r => r.into(),
-        });
-        event_flow!(state.text.handle(event, ReadOnly));
+            event_flow!(state.text.handle(event, Regular));
+        } else {
+            event_flow!(match state.files.handle(event, Regular) {
+                Outcome::Changed => {
+                    read_file(state)?;
+                    Control::Changed
+                }
+                r => r.into(),
+            });
+            event_flow!(state.text.handle(event, ReadOnly));
+        }
     }
 
     if let RdEvent::Timer(timeout) = event {
@@ -293,11 +328,68 @@ pub fn event(
     Ok(Control::Continue)
 }
 
+fn insert_new(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    if state.edit.is_some() {
+        save_current(state, ctx)?;
+    } else {
+        let idx = state.files.selected_checked().unwrap_or(0);
+        state
+            .txt_files
+            .insert(idx, (String::default(), PathBuf::default()));
+        state.text.clear();
+        state.edit = Some(idx);
+        ctx.focus().focus(&state.text);
+    }
+    Ok(Control::Changed)
+}
+
+fn flip_edit(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
+    if state.edit.is_some() {
+        save_current(state, ctx)?;
+    } else {
+        let idx = state.files.selected_checked().unwrap_or(0);
+        state.edit = Some(idx);
+        ctx.focus().focus(&state.text);
+    }
+    Ok(Control::Changed)
+}
+
+fn save_current(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
+    if let Some(idx) = state.edit {
+        let (mut name, mut file) = state.txt_files[idx].clone();
+
+        if name.is_empty() {
+            let sel = state.text.selected_text();
+            if sel.is_empty() && !state.text.is_empty() {
+                return Err(anyhow!("select text for file-name"));
+            }
+            name = sel.to_string();
+            file = ctx.cfg.base.join(&name).with_extension("txt");
+            state.txt_files[idx] = (name.clone(), file.clone());
+        }
+
+        if name.is_empty() {
+            state.txt_files.remove(idx);
+            if idx >= state.txt_files.len() {
+                state.files.select(Some(state.txt_files.len() - 1));
+            }
+            read_file(state)?;
+            state.edit = None;
+        } else {
+            fs::write(file, state.text.text())?;
+            state.edit = None;
+        }
+    }
+    Ok(())
+}
+
 fn reload_files(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
-    load_files(state, ctx)?;
-    if state.files.selected_checked().is_none() {
-        if state.txt_files.len() > 0 {
-            state.files.select(Some(state.txt_files.len() - 1));
+    if !state.edit.is_some() {
+        load_files(state, ctx)?;
+        if state.files.selected_checked().is_none() {
+            if state.txt_files.len() > 0 {
+                state.files.select(Some(state.txt_files.len() - 1));
+            }
         }
         read_file(state)?;
         Ok(Control::Changed)
@@ -321,7 +413,9 @@ fn load_files(state: &mut Scenery, ctx: &Global) -> Result<(), Error> {
             state.txt_files.push((name, f.path()));
         }
     }
-    state.txt_files.sort();
+    state
+        .txt_files
+        .sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
 
     state.files.rows_changed(state.txt_files.len());
 
@@ -343,8 +437,7 @@ fn read_file(state: &mut Scenery) -> Result<(), Error> {
                 buf.push_str("\n\n");
             }
         }
-
-        state.text.set_text(txt);
+        state.text.set_text(buf);
     } else {
         state.text.clear();
     }
@@ -400,7 +493,8 @@ fn faster(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Err
 
 fn start_stop(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     if state.timer == TimerHandle::default() {
-        state.timer = ctx.add_timer(
+        state.timer = ctx.replace_timer(
+            Some(state.timer),
             TimerDef::new()
                 .timer(Duration::from_millis(ctx.cfg.delay))
                 .repeat_forever(),
