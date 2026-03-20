@@ -1,7 +1,7 @@
-#![cfg_attr(
-    all(feature = "wgpu", not(feature = "term"), windows),
-    windows_subsystem = "windows"
-)]
+// #![cfg_attr(
+//     all(feature = "wgpu", not(feature = "term"), windows),
+//     windows_subsystem = "windows"
+// )]
 #[cfg(feature = "term")]
 pub(crate) use rat_salsa;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
@@ -14,6 +14,8 @@ use crate::rat_salsa::poll::{PollRendered, PollTasks, PollTimers};
 use crate::rat_salsa::timer::{TimeOut, TimerDef, TimerHandle};
 use crate::rat_salsa::{Control, RunConfig, SalsaAppContext, SalsaContext, run_tui};
 use anyhow::{Error, anyhow};
+use configparser::ini::Ini;
+use dirs::config_dir;
 use log::debug;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 use rat_salsa_wgpu::events::ConvertCrossterm;
@@ -45,29 +47,32 @@ fn main() -> Result<(), Error> {
     setup_logging()?;
     setup_cli_clipboard();
 
-    let mut config = Config::default();
-    config.delay = 1500;
+    let mut config = Config::load()?;
+
     let mut args = args();
     args.next();
     if let Some(dir) = args.next() {
         config.base = PathBuf::from(dir);
-    } else {
-        config.base = PathBuf::from(".");
     }
 
-    let theme = rat_theme4::create_salsa_theme("EverForest Light");
-    let mut global = Global::new(config, theme);
+    let mut global = Global::new(config);
     let mut state = Scenery::default();
-    state.show_files = true;
 
     #[cfg(all(feature = "wgpu", not(feature = "term")))]
     let run_cfg = {
-        RunConfig::new(ConvertCrossterm::new())?
+        let mut r = RunConfig::new(ConvertCrossterm::new())?
             .window_title("Read")
             .poll(PollTasks::default())
             .poll(PollTimers::default())
             .poll(PollBlink::default())
-            .poll(PollRendered)
+            .poll(PollRendered);
+        if !global.cfg.font.is_empty() {
+            r = r.font_family(&global.cfg.font);
+        }
+        if global.cfg.font_size != 0.0 {
+            r = r.font_size(global.cfg.font_size);
+        }
+        r
     };
     #[cfg(feature = "term")]
     let run_cfg = RunConfig::default()?
@@ -101,7 +106,8 @@ impl SalsaContext<RdEvent, Error> for Global {
 }
 
 impl Global {
-    pub fn new(cfg: Config, theme: SalsaTheme) -> Self {
+    pub fn new(cfg: Config) -> Self {
+        let theme = create_salsa_theme(&cfg.theme);
         Self {
             ctx: Default::default(),
             cfg,
@@ -111,10 +117,94 @@ impl Global {
 }
 
 /// Configuration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Config {
     delay: u64,
     base: PathBuf,
+    theme: String,
+    font: String,
+    font_size: f64,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            delay: 1000,
+            base: PathBuf::from("."),
+            theme: "EverForest Light".to_string(),
+            font: "".to_string(),
+            font_size: 0.0,
+        }
+    }
+}
+
+impl Config {
+    pub fn load() -> Result<Config, Error> {
+        if let Some(config) = config_dir() {
+            let cfg_path = config.join("read");
+            fs::create_dir_all(&cfg_path)?;
+            let cfg_file = cfg_path.join("read.ini");
+
+            if cfg_file.exists() {
+                let mut ini = Ini::new();
+                match ini.load(cfg_file) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(anyhow!(e));
+                    }
+                }
+
+                let delay = ini.get("", "delay").unwrap_or("1000".to_string()).parse()?;
+                let base = ini.get("", "base").unwrap_or(".".to_string()).into();
+                let theme = ini
+                    .get("", "theme")
+                    .unwrap_or("EverForest Light".to_string());
+                let font = ini.get("", "font").unwrap_or_default();
+                let font_size = ini
+                    .get("", "font-size")
+                    .unwrap_or("22".to_string())
+                    .parse()?;
+
+                Ok(Config {
+                    delay,
+                    base,
+                    theme,
+                    font,
+                    font_size,
+                })
+            } else {
+                Ok(Config::default())
+            }
+        } else {
+            Ok(Config::default())
+        }
+    }
+
+    pub fn store(&self) -> Result<(), Error> {
+        if let Some(config) = config_dir() {
+            let cfg_path = config.join("read");
+            let cfg_file = cfg_path.join("read.ini");
+
+            let mut ini = Ini::new();
+            if cfg_file.exists() {
+                match ini.load(&cfg_file) {
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(anyhow!(e));
+                    }
+                }
+            }
+            ini.set("", "delay", Some(self.delay.to_string()));
+            ini.set("", "base", Some(self.base.to_string_lossy().to_string()));
+            ini.set("", "theme", Some(self.theme.clone()));
+            ini.set("", "font", Some(self.font.clone()));
+            ini.set("", "font-size", Some(self.font_size.to_string()));
+
+            ini.write(cfg_file)?;
+        }
+
+        Ok(())
+    }
 }
 
 /// Application wide messages.
@@ -124,6 +214,7 @@ pub enum RdEvent {
     Event(crossterm::event::Event),
     Rendered,
     Message(String),
+    CfgChanged,
 }
 
 impl From<RenderedEvent> for RdEvent {
@@ -144,7 +235,7 @@ impl From<crossterm::event::Event> for RdEvent {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Scenery {
     pub edit: Option<usize>,
     pub txt_files: Vec<(String, PathBuf)>,
@@ -156,6 +247,20 @@ pub struct Scenery {
     pub text: TextAreaState,
 
     pub error_dlg: MsgDialogState,
+}
+
+impl Default for Scenery {
+    fn default() -> Self {
+        Self {
+            edit: Default::default(),
+            txt_files: Default::default(),
+            show_files: true,
+            timer: Default::default(),
+            files: Default::default(),
+            text: Default::default(),
+            error_dlg: Default::default(),
+        }
+    }
 }
 
 impl HasFocus for Scenery {
@@ -193,8 +298,11 @@ pub fn render(
 
     let lt = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).split(lr[1]);
 
-    let idx = state.files.selected_checked().unwrap_or(0);
-    let (name, _) = &state.txt_files[idx];
+    let name = if let Some(idx) = state.files.selected_checked() {
+        &state.txt_files[idx].0
+    } else {
+        ""
+    };
     if state.edit.is_some() {
         Line::from(format!("[editing] {}", name))
             .style(ctx.theme.style_style(Style::TITLE))
@@ -254,15 +362,27 @@ pub fn event(
             state.error_dlg.append(s.as_str());
             Control::Changed
         }),
+        RdEvent::CfgChanged => event_flow!({
+            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            {
+                ctx.cfg.font = ctx.font_family();
+                ctx.cfg.font_size = ctx.font_size();
+            }
+            ctx.cfg.theme = ctx.theme.name.clone();
+            ctx.cfg.store()?;
+            Control::Continue
+        }),
         _ => {}
     }
 
     if let RdEvent::Event(event) = event {
         match &event {
-            ct_event!(resized) => event_flow!(Control::Changed),
+            ct_event!(resized) => event_flow!({
+                ctx.queue_event(RdEvent::CfgChanged);
+                Control::Changed
+            }),
             ct_event!(focus_gained) => event_flow!(reload_files(state, ctx)?),
             ct_event!(key press CONTROL-'q') => event_flow!(Control::Quit),
-            ct_event!(key press 'q') => event_flow!(Control::Quit),
             _ => {}
         };
 
@@ -347,9 +467,10 @@ fn flip_edit(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, 
     if state.edit.is_some() {
         save_current(state, ctx)?;
     } else {
-        let idx = state.files.selected_checked().unwrap_or(0);
-        state.edit = Some(idx);
-        ctx.focus().focus(&state.text);
+        if let Some(idx) = state.files.selected_checked() {
+            state.edit = Some(idx);
+            ctx.focus().focus(&state.text);
+        }
     }
     Ok(Control::Changed)
 }
@@ -384,18 +505,45 @@ fn save_current(state: &mut Scenery, ctx: &mut Global) -> Result<(), Error> {
 }
 
 fn reload_files(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
-    if !state.edit.is_some() {
-        load_files(state, ctx)?;
-        if state.files.selected_checked().is_none() {
-            if state.txt_files.len() > 0 {
-                state.files.select(Some(state.txt_files.len() - 1));
+    if state.edit.is_some() {
+        return Ok(Control::Continue);
+    }
+
+    let sel = if let Some(sel_idx) = state.files.selected_checked() {
+        Some((
+            sel_idx,
+            state.txt_files[sel_idx].0.clone(),
+            state.txt_files[sel_idx].1.clone(),
+        ))
+    } else {
+        None
+    };
+
+    load_files(state, ctx)?;
+
+    if state.txt_files.is_empty() {
+        state.files.select(None);
+        state.text.clear();
+    } else {
+        let idx = if let Some(sel) = &sel {
+            state
+                .txt_files
+                .iter()
+                .position(|v| sel.1 == v.1)
+                .unwrap_or(sel.0)
+        } else {
+            0
+        };
+
+        state.files.select(Some(idx));
+        if let Some(sel) = &sel {
+            if state.txt_files[idx].0 != sel.1 {
+                read_file(state)?;
             }
         }
-        read_file(state)?;
-        Ok(Control::Changed)
-    } else {
-        Ok(Control::Continue)
     }
+
+    Ok(Control::Changed)
 }
 
 fn load_files(state: &mut Scenery, ctx: &Global) -> Result<(), Error> {
@@ -477,6 +625,7 @@ fn slower(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Err
             .timer(Duration::from_millis(ctx.cfg.delay))
             .repeat_forever(),
     );
+    ctx.queue_event(RdEvent::CfgChanged);
     Ok(Control::Changed)
 }
 
@@ -488,6 +637,7 @@ fn faster(state: &mut Scenery, ctx: &mut Global) -> Result<Control<RdEvent>, Err
             .timer(Duration::from_millis(ctx.cfg.delay))
             .repeat_forever(),
     );
+    ctx.queue_event(RdEvent::CfgChanged);
     Ok(Control::Changed)
 }
 
@@ -517,6 +667,7 @@ fn next_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     } else {
         ctx.theme = create_salsa_theme(themes[0]);
     }
+    ctx.queue_event(RdEvent::CfgChanged);
     Ok(Control::Changed)
 }
 
@@ -531,6 +682,7 @@ fn prev_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     } else {
         ctx.theme = create_salsa_theme(themes[themes.len() - 1]);
     }
+    ctx.queue_event(RdEvent::CfgChanged);
     Ok(Control::Changed)
 }
 
