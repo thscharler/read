@@ -14,12 +14,13 @@ ratatui = "0.30"
 crossterm = "0.29"
 fern = "0.7"
 log = "0.4"
-dirs = "6.0"
+dirs = "7.0"
 configparser = { version = "3.1", features = ["indexmap"] }
 winit = { version = "0.30", optional = true }
 
 rat-salsa = { version = "4.0", features = ["dialog_widgets"], optional = true }
-rat-salsa-wgpu = { version = "0.10", git = "https://github.com/thscharler/rat-salsa-wgpu", features = ["fallback_symbol_font", "fallback_emoji_font"], optional = true }
+rat-salsa-wgpu = { version = "0.10", path = "../rat-salsa-wgpu", features = ["fallback_symbol_font", "fallback_emoji_font"], optional = true }
+#rat-salsa-wgpu = { version = "0.10", git = "https://github.com/thscharler/rat-salsa-wgpu", features = ["fallback_symbol_font", "fallback_emoji_font"], optional = true }
 rat-widget = { version = "3.2", features = ["user_directories", "cli-clipboard"] }
 rat-theme4 = { version = "4.5" }
 
