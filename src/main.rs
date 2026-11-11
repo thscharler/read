@@ -69,7 +69,7 @@ fn main() -> Result<(), Error> {
         if !global.cfg.font.is_empty() {
             r = r.font_family(&global.cfg.font);
         }
-        if global.cfg.font_size != 0.0 {
+        if global.cfg.font_size != 0 {
             r = r.font_size(global.cfg.font_size);
         }
         r
@@ -123,7 +123,7 @@ pub struct Config {
     base: PathBuf,
     theme: String,
     font: String,
-    font_size: f64,
+    font_size: u32,
 }
 
 impl Default for Config {
@@ -133,7 +133,7 @@ impl Default for Config {
             base: PathBuf::from("."),
             theme: "EverForest Light".to_string(),
             font: "".to_string(),
-            font_size: 0.0,
+            font_size: 20,
         }
     }
 }
