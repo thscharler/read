@@ -19,7 +19,7 @@ use dirs::config_dir;
 use log::debug;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 use rat_salsa_wgpu::events::ConvertCrossterm;
-use rat_salsa_wgpu::font::FontData;
+use rat_salsa_wgpu::font::installed_mono_fonts;
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 use rat_salsa_wgpu::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
@@ -688,30 +688,30 @@ fn prev_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
 
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 fn next_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
-    let fonts = FontData.installed_fonts();
+    let fonts = installed_mono_fonts();
     let idx = fonts
         .iter()
         .position(|v| v == &ctx.font_family())
         .unwrap_or(0);
     if idx + 1 < fonts.len() {
-        ctx.set_font_family(&fonts[idx + 1]);
+        _ = ctx.set_font_family(&fonts[idx + 1]);
     } else {
-        ctx.set_font_family(&fonts[0]);
+        _ = ctx.set_font_family(&fonts[0]);
     }
     Ok(Control::Changed)
 }
 
 #[cfg(all(feature = "wgpu", not(feature = "term")))]
 fn prev_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
-    let fonts = FontData.installed_fonts();
+    let fonts = installed_mono_fonts();
     let idx = fonts
         .iter()
         .position(|v| v == &ctx.font_family())
         .unwrap_or(0);
     if idx > 1 {
-        ctx.set_font_family(&fonts[idx - 1]);
+        _ = ctx.set_font_family(&fonts[idx - 1]);
     } else {
-        ctx.set_font_family(&fonts[fonts.len() - 1]);
+        _ = ctx.set_font_family(&fonts[fonts.len() - 1]);
     }
     Ok(Control::Changed)
 }
