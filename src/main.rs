@@ -4,7 +4,7 @@
 // )]
 #[cfg(feature = "term")]
 pub(crate) use rat_salsa;
-#[cfg(all(feature = "wgpu", not(feature = "term")))]
+#[cfg(feature = "wgpu")]
 pub(crate) use rat_salsa_wgpu as rat_salsa;
 
 use crate::rat_salsa::event::RenderedEvent;
@@ -17,10 +17,11 @@ use anyhow::{Error, anyhow};
 use configparser::ini::Ini;
 use dirs::config_dir;
 use log::debug;
-#[cfg(all(feature = "wgpu", not(feature = "term")))]
-use rat_salsa_wgpu::events::ConvertCrossterm;
+#[cfg(feature = "wgpu")]
+use rat_salsa_wgpu::events::{WindowEventState, winit_to_crossterm_event};
+#[cfg(feature = "wgpu")]
 use rat_salsa_wgpu::font::installed_mono_fonts;
-#[cfg(all(feature = "wgpu", not(feature = "term")))]
+#[cfg(feature = "wgpu")]
 use rat_salsa_wgpu::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
@@ -42,6 +43,8 @@ use std::env::args;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
+#[cfg(feature = "wgpu")]
+use winit::event::WindowEvent;
 
 fn main() -> Result<(), Error> {
     setup_logging()?;
@@ -58,9 +61,9 @@ fn main() -> Result<(), Error> {
     let mut global = Global::new(config);
     let mut state = Scenery::default();
 
-    #[cfg(all(feature = "wgpu", not(feature = "term")))]
+    #[cfg(feature = "wgpu")]
     let run_cfg = {
-        let mut r = RunConfig::new(ConvertCrossterm::new())?
+        let mut r = RunConfig::new()?
             .window_title("Read")
             .poll(PollTasks::default())
             .poll(PollTimers::default())
@@ -229,6 +232,15 @@ impl From<TimeOut> for RdEvent {
     }
 }
 
+#[cfg(feature = "wgpu")]
+impl TryFrom<(&WindowEvent, &WindowEventState)> for RdEvent {
+    type Error = ();
+
+    fn try_from(value: (&WindowEvent, &WindowEventState)) -> Result<Self, Self::Error> {
+        winit_to_crossterm_event(value).map(|v| RdEvent::Event(v))
+    }
+}
+
 impl From<crossterm::event::Event> for RdEvent {
     fn from(value: crossterm::event::Event) -> Self {
         Self::Event(value)
@@ -363,7 +375,7 @@ pub fn event(
             Control::Changed
         }),
         RdEvent::CfgChanged => event_flow!({
-            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            #[cfg(feature = "wgpu")]
             {
                 ctx.cfg.font = ctx.font_family();
                 ctx.cfg.font_size = ctx.font_size();
@@ -403,9 +415,9 @@ pub fn event(
             ct_event!(keycode press F(3)) => event_flow!(flip_files(state, ctx)?),
             ct_event!(keycode press F(5)) => event_flow!(faster(state, ctx)?),
             ct_event!(keycode press F(6)) => event_flow!(slower(state, ctx)?),
-            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            #[cfg(feature = "wgpu")]
             ct_event!(keycode press F(7)) => event_flow!(next_font(ctx)?),
-            #[cfg(all(feature = "wgpu", not(feature = "term")))]
+            #[cfg(feature = "wgpu")]
             ct_event!(keycode press SHIFT-F(7)) => event_flow!(prev_font(ctx)?),
             ct_event!(keycode press F(8)) => event_flow!(next_theme(ctx)?),
             ct_event!(keycode press SHIFT-F(8)) => event_flow!(prev_theme(ctx)?),
@@ -686,7 +698,7 @@ fn prev_theme(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     Ok(Control::Changed)
 }
 
-#[cfg(all(feature = "wgpu", not(feature = "term")))]
+#[cfg(feature = "wgpu")]
 fn next_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     let fonts = installed_mono_fonts();
     let idx = fonts
@@ -701,7 +713,7 @@ fn next_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     Ok(Control::Changed)
 }
 
-#[cfg(all(feature = "wgpu", not(feature = "term")))]
+#[cfg(feature = "wgpu")]
 fn prev_font(ctx: &mut Global) -> Result<Control<RdEvent>, Error> {
     let fonts = installed_mono_fonts();
     let idx = fonts
