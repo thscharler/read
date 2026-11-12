@@ -18,7 +18,7 @@ use configparser::ini::Ini;
 use dirs::config_dir;
 use log::debug;
 #[cfg(feature = "wgpu")]
-use rat_salsa_wgpu::events::{WindowEventState, winit_to_crossterm_event};
+use rat_salsa_wgpu::event::{WindowEventState, winit_to_crossterm_event};
 #[cfg(feature = "wgpu")]
 use rat_salsa_wgpu::font::installed_mono_fonts;
 #[cfg(feature = "wgpu")]
