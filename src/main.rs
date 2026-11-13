@@ -1,11 +1,9 @@
 // #![cfg_attr(
-//     all(feature = "wgpu", not(feature = "term"), windows),
+//     all(feature = "wgpu", windows),
 //     windows_subsystem = "windows"
 // )]
-#[cfg(feature = "term")]
-pub(crate) use rat_salsa;
-#[cfg(feature = "wgpu")]
-pub(crate) use rat_salsa_wgpu as rat_salsa;
+
+pub(crate) use rat_salsa_switch as rat_salsa;
 
 use crate::rat_salsa::event::RenderedEvent;
 #[cfg(feature = "term")]
@@ -18,11 +16,13 @@ use configparser::ini::Ini;
 use dirs::config_dir;
 use log::debug;
 #[cfg(feature = "wgpu")]
-use rat_salsa_wgpu::event::{WindowEventState, winit_to_crossterm_event};
+use rat_salsa::event::WindowEvent;
 #[cfg(feature = "wgpu")]
-use rat_salsa_wgpu::font::installed_mono_fonts;
+use rat_salsa::event::{WindowEventState, winit_to_crossterm_event};
 #[cfg(feature = "wgpu")]
-use rat_salsa_wgpu::poll::PollBlink;
+use rat_salsa::font::installed_mono_fonts;
+#[cfg(feature = "wgpu")]
+use rat_salsa::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
 use rat_widget::event::{Dialog, HandleEvent, Outcome, ReadOnly, Regular, ct_event, event_flow};
@@ -43,8 +43,6 @@ use std::env::args;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
-#[cfg(feature = "wgpu")]
-use winit::event::WindowEvent;
 
 fn main() -> Result<(), Error> {
     setup_logging()?;
