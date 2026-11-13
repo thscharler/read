@@ -6,8 +6,8 @@ edition = "2024"
 [features]
 default = []
 
-wgpu = ["rat-salsa-switch/wgpu"]
-term = ["rat-salsa-switch/term"]
+wgpu = ["rat-salsa-wgpu"]
+term = ["rat-salsa"]
 
 [dependencies]
 anyhow = "1.0"
@@ -17,8 +17,8 @@ fern = "0.7"
 log = "0.4"
 dirs = "7.0"
 configparser = { version = "3.1", features = ["indexmap"] }
-
-rat-salsa-switch = { version = "0.1", path = "../rat-salsa-switch", features = ["dialog_widgets"] }
+rat-salsa = { version = "4.0", features = ["dialog_widgets"], optional = true }
+rat-salsa-wgpu = { version = "1.0", features = ["dialog_widgets"], optional = true }
 rat-widget = { version = "3.2", features = ["user_directories", "cli-clipboard"] }
 rat-theme4 = { version = "4.5" }
 

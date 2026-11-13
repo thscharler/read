@@ -3,7 +3,10 @@
 //     windows_subsystem = "windows"
 // )]
 
-pub(crate) use rat_salsa_switch as rat_salsa;
+#[cfg(feature = "term")]
+pub(crate) use rat_salsa;
+#[cfg(feature = "wgpu")]
+pub(crate) use rat_salsa_wgpu as rat_salsa;
 
 use crate::rat_salsa::event::RenderedEvent;
 #[cfg(feature = "term")]
@@ -20,7 +23,7 @@ use rat_salsa::event::WindowEvent;
 #[cfg(feature = "wgpu")]
 use rat_salsa::event::{WindowEventState, winit_to_crossterm_event};
 #[cfg(feature = "wgpu")]
-use rat_salsa::font::installed_mono_fonts;
+use rat_salsa::backend::font::installed_mono_fonts;
 #[cfg(feature = "wgpu")]
 use rat_salsa::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
