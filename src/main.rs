@@ -19,13 +19,11 @@ use configparser::ini::Ini;
 use dirs::config_dir;
 use log::debug;
 #[cfg(feature = "wgpu")]
+use rat_salsa::backend::font::installed_mono_fonts;
+#[cfg(feature = "wgpu")]
 use rat_salsa::event::WindowEvent;
 #[cfg(feature = "wgpu")]
 use rat_salsa::event::{WindowEventState, winit_to_crossterm_event};
-#[cfg(feature = "wgpu")]
-use rat_salsa::backend::font::installed_mono_fonts;
-#[cfg(feature = "wgpu")]
-use rat_salsa::poll::PollBlink;
 use rat_theme4::theme::SalsaTheme;
 use rat_theme4::{StyleName, WidgetStyle, create_salsa_theme};
 use rat_widget::event::{Dialog, HandleEvent, Outcome, ReadOnly, Regular, ct_event, event_flow};
@@ -68,7 +66,6 @@ fn main() -> Result<(), Error> {
             .window_title("Read")
             .poll(PollTasks::default())
             .poll(PollTimers::default())
-            .poll(PollBlink::default())
             .poll(PollRendered);
         if !global.cfg.font.is_empty() {
             r = r.font_family(&global.cfg.font);
